@@ -5,3 +5,9 @@ verify_jwt = false
 
 [functions.chat]
 verify_jwt = false
+
+[functions.graph-filters]
+verify_jwt = false
+
+[functions.graph-analytics]
+verify_jwt = false
