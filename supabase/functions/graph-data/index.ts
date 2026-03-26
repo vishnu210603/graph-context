@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import neo4j from "npm:neo4j-driver@5.27.0";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -8,6 +9,7 @@ const corsHeaders = {
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
+  let driver;
   try {
     const NEO4J_URI = Deno.env.get('NEO4J_URI');
     const NEO4J_USER = Deno.env.get('NEO4J_USER');
@@ -17,99 +19,65 @@ serve(async (req) => {
       throw new Error('Neo4j credentials not configured');
     }
 
-    // Convert bolt URI to HTTP API
-    const httpUri = NEO4J_URI
-      .replace('neo4j+s://', 'https://')
-      .replace('neo4j://', 'http://')
-      .replace('bolt+s://', 'https://')
-      .replace('bolt://', 'http://');
+    driver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD));
+    const session = driver.session();
 
-    // Query to get a sample of the graph (limit for performance)
-    const query = `
-      MATCH (n)
-      WITH n LIMIT 200
-      OPTIONAL MATCH (n)-[r]->(m)
-      RETURN 
-        collect(DISTINCT {
-          id: elementId(n),
-          labels: labels(n),
-          properties: properties(n)
-        }) as nodes,
-        collect(DISTINCT {
-          source: elementId(n),
-          target: elementId(m),
-          type: type(r)
-        }) as relationships
-    `;
+    try {
+      // Get nodes
+      const nodesResult = await session.run('MATCH (n) RETURN n LIMIT 300');
+      const relsResult = await session.run('MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 500');
 
-    const response = await fetch(`${httpUri}/db/neo4j/tx/commit`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Basic ' + btoa(`${NEO4J_USER}:${NEO4J_PASSWORD}`),
-      },
-      body: JSON.stringify({
-        statements: [{ statement: query, resultDataContents: ['row'] }],
-      }),
-    });
+      const nodeMap = new Map();
 
-    if (!response.ok) {
-      const text = await response.text();
-      console.error('Neo4j error:', response.status, text);
-      throw new Error(`Neo4j query failed: ${response.status}`);
-    }
+      function addNode(record: any) {
+        const node = record;
+        const id = node.elementId || node.identity?.toString();
+        if (!id || nodeMap.has(id)) return id;
+        const labels = node.labels || [];
+        const props: Record<string, any> = {};
+        for (const [k, v] of Object.entries(node.properties || {})) {
+          props[k] = typeof v === 'object' && v !== null && 'low' in v ? (v as any).low : v;
+        }
+        const type = labels[0] || 'Unknown';
+        const label = props.name || props.id || props.number || props.description || props.MaterialNumber || props.CustomerNumber || String(id).split(':').pop();
+        nodeMap.set(id, { id, label: String(label).substring(0, 30), type, properties: props });
+        return id;
+      }
 
-    const result = await response.json();
-    
-    if (result.errors && result.errors.length > 0) {
-      console.error('Neo4j query errors:', result.errors);
-      throw new Error(result.errors[0].message);
-    }
+      for (const record of nodesResult.records) {
+        addNode(record.get('n'));
+      }
 
-    const row = result.results?.[0]?.data?.[0]?.row;
-    const rawNodes = row?.[0] || [];
-    const rawRels = row?.[1] || [];
+      const links: any[] = [];
+      const seenLinks = new Set();
+      for (const record of relsResult.records) {
+        const n = record.get('n');
+        const r = record.get('r');
+        const m = record.get('m');
+        const sourceId = addNode(n);
+        const targetId = addNode(m);
+        const relType = r.type;
+        const key = `${sourceId}-${relType}-${targetId}`;
+        if (!seenLinks.has(key)) {
+          seenLinks.add(key);
+          links.push({ source: sourceId, target: targetId, label: relType });
+        }
+      }
 
-    // Build unique nodes
-    const nodeMap = new Map();
-    for (const n of rawNodes) {
-      if (!n.id || nodeMap.has(n.id)) continue;
-      const type = n.labels?.[0] || 'Unknown';
-      const props = n.properties || {};
-      const label = props.name || props.id || props.number || props.description || n.id.split(':').pop();
-      nodeMap.set(n.id, {
-        id: n.id,
-        label: String(label).substring(0, 30),
-        type,
-        properties: props,
+      await session.close();
+      return new Response(JSON.stringify({ nodes: Array.from(nodeMap.values()), links }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
+    } finally {
+      await session.close();
     }
-
-    // Build links (only where both source and target exist)
-    const links = [];
-    const seenLinks = new Set();
-    for (const r of rawRels) {
-      if (!r.source || !r.target || !r.type) continue;
-      if (!nodeMap.has(r.source) || !nodeMap.has(r.target)) continue;
-      const key = `${r.source}-${r.type}-${r.target}`;
-      if (seenLinks.has(key)) continue;
-      seenLinks.add(key);
-      links.push({ source: r.source, target: r.target, label: r.type });
-    }
-
-    const graphData = {
-      nodes: Array.from(nodeMap.values()),
-      links,
-    };
-
-    return new Response(JSON.stringify(graphData), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
   } catch (error) {
     console.error('Graph data error:', error);
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
+  } finally {
+    if (driver) await driver.close();
   }
 });

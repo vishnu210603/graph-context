@@ -1,83 +1,83 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import neo4j from "npm:neo4j-driver@5.27.0";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
-const SYSTEM_PROMPT = `You are a data analyst assistant for a business graph database. The database contains the following entity types and relationships:
+const SYSTEM_PROMPT = `You are a data analyst assistant for a business graph database stored in Neo4j. The database contains these entity types:
 
-ENTITIES:
-- SalesOrder / PurchaseOrder: Business orders with properties like order number, date, amount
-- Delivery: Deliveries linked to orders, with delivery dates and quantities
-- BillingDocument / Invoice: Billing records linked to deliveries and orders
-- Payment / JournalEntry: Financial records linked to invoices
-- Customer: Customer entities with names and IDs
-- Material / Product: Items ordered or delivered
-- Plant: Warehouse/plant locations
+ENTITIES: SalesOrder, PurchaseOrder, Delivery, BillingDocument, Invoice, Payment, JournalEntry, Customer, Material, Product, Plant, Address, SalesOrderItem, PurchaseOrderItem
 
-RELATIONSHIPS:
-- Orders CONTAIN items (PurchaseOrderItem, SalesOrderItem)
-- Orders are linked to Customers
-- Deliveries are linked to Orders and Plants
-- BillingDocuments are linked to Deliveries and Orders
-- JournalEntries are linked to BillingDocuments
-- Items reference Materials/Products
+RELATIONSHIPS: Orders CONTAIN items, Orders linked to Customers, Deliveries linked to Orders/Plants, BillingDocuments linked to Deliveries/Orders, JournalEntries linked to BillingDocuments, Items reference Materials/Products
 
-You can answer questions about:
-- Order flows (order → delivery → billing → payment)
-- Finding broken/incomplete flows
-- Product/material analysis
-- Customer analysis
-- Relationships between entities
+IMPORTANT RULES:
+1. When you need data, generate exactly ONE Cypher query in a \`\`\`cypher code block. Only ONE query.
+2. ONLY answer questions about this business dataset (orders, deliveries, invoices, customers, products, etc.)
+3. For unrelated questions respond: "This system is designed to answer questions related to the provided dataset only."
+4. Keep queries simple and efficient. Use LIMIT when appropriate.
+5. Provide clear natural language answers grounded in the data.`;
 
-GUARDRAILS:
-- ONLY answer questions related to the dataset and domain (orders, deliveries, invoices, payments, customers, products, etc.)
-- If a user asks about general knowledge, creative writing, coding help, or anything NOT related to this business data, respond with: "This system is designed to answer questions related to the provided dataset only. Please ask about orders, deliveries, invoices, customers, or products."
-- Always ground your answers in the data. If you need to query, generate a Cypher query.
+async function executeCypher(query: string): Promise<any> {
+  const NEO4J_URI = Deno.env.get('NEO4J_URI');
+  const NEO4J_USER = Deno.env.get('NEO4J_USER');
+  const NEO4J_PASSWORD = Deno.env.get('NEO4J_PASSWORD');
 
-When you need to query data, generate a Cypher query and I will execute it. Format queries in a \`\`\`cypher code block.
+  if (!NEO4J_URI || !NEO4J_USER || !NEO4J_PASSWORD) return null;
 
-Provide clear, concise answers with relevant data points.`;
+  const driver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD));
+  const session = driver.session();
+
+  try {
+    const result = await session.run(query);
+    const records = result.records.map((record: any) => {
+      const obj: Record<string, any> = {};
+      record.keys.forEach((key: string) => {
+        const val = record.get(key);
+        if (val && typeof val === 'object' && val.properties) {
+          obj[key] = { labels: val.labels, ...val.properties };
+          // Convert neo4j integers
+          for (const [k, v] of Object.entries(obj[key])) {
+            if (typeof v === 'object' && v !== null && 'low' in v) obj[key][k] = (v as any).low;
+          }
+        } else if (typeof val === 'object' && val !== null && 'low' in val) {
+          obj[key] = (val as any).low;
+        } else {
+          obj[key] = val;
+        }
+      });
+      return obj;
+    });
+    return records;
+  } catch (err) {
+    console.error('Cypher execution error:', err);
+    return { error: err.message };
+  } finally {
+    await session.close();
+    await driver.close();
+  }
+}
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
   try {
     const { messages } = await req.json();
-    
     const GROQ_API_KEY = Deno.env.get('GROQ_API_KEY');
-    const NEO4J_URI = Deno.env.get('NEO4J_URI');
-    const NEO4J_USER = Deno.env.get('NEO4J_USER');
-    const NEO4J_PASSWORD = Deno.env.get('NEO4J_PASSWORD');
-
     if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY is not configured');
 
-    // First LLM call to understand the query and potentially generate Cypher
-    const llmMessages = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...messages,
-    ];
+    const llmMessages = [{ role: 'system', content: SYSTEM_PROMPT }, ...messages];
 
     const llmResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: llmMessages,
-        temperature: 0.3,
-        max_tokens: 2048,
-      }),
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: llmMessages, temperature: 0.3, max_tokens: 1500 }),
     });
 
     if (!llmResponse.ok) {
-      const errText = await llmResponse.text();
-      console.error('Groq error:', llmResponse.status, errText);
       if (llmResponse.status === 429) {
-        return new Response(JSON.stringify({ reply: 'Rate limit reached. Please wait a moment and try again.' }), {
+        return new Response(JSON.stringify({ reply: 'Rate limit reached. Please wait and try again.' }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -87,73 +87,36 @@ serve(async (req) => {
     const llmResult = await llmResponse.json();
     let reply = llmResult.choices?.[0]?.message?.content || 'No response generated.';
 
-    // Check if the reply contains a Cypher query to execute
+    // Execute Cypher if present
     const cypherMatch = reply.match(/```cypher\n([\s\S]*?)```/);
-    
-    if (cypherMatch && NEO4J_URI && NEO4J_USER && NEO4J_PASSWORD) {
+    if (cypherMatch) {
       const cypherQuery = cypherMatch[1].trim();
-      
-      const httpUri = NEO4J_URI
-        .replace('neo4j+s://', 'https://')
-        .replace('neo4j://', 'http://')
-        .replace('bolt+s://', 'https://')
-        .replace('bolt://', 'http://');
+      const queryResult = await executeCypher(cypherQuery);
 
-      try {
-        const neo4jResponse = await fetch(`${httpUri}/db/neo4j/tx/commit`, {
+      if (queryResult && !queryResult.error) {
+        const resultStr = JSON.stringify(queryResult.slice(0, 50)).substring(0, 4000);
+
+        const followUp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Basic ' + btoa(`${NEO4J_USER}:${NEO4J_PASSWORD}`),
-          },
+          headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            statements: [{ statement: cypherQuery, resultDataContents: ['row'] }],
+            model: 'llama-3.3-70b-versatile',
+            messages: [
+              ...llmMessages,
+              { role: 'assistant', content: reply },
+              { role: 'user', content: `Here are the query results (${queryResult.length} total records). Provide a clear natural language summary:\n${resultStr}` },
+            ],
+            temperature: 0.3,
+            max_tokens: 1500,
           }),
         });
 
-        if (neo4jResponse.ok) {
-          const neo4jResult = await neo4jResponse.json();
-          
-          if (neo4jResult.errors?.length > 0) {
-            reply += `\n\n⚠️ Query error: ${neo4jResult.errors[0].message}`;
-          } else {
-            const columns = neo4jResult.results?.[0]?.columns || [];
-            const rows = neo4jResult.results?.[0]?.data?.map((d: any) => d.row) || [];
-            
-            if (rows.length > 0) {
-              // Send results back to LLM for natural language answer
-              const resultSummary = JSON.stringify({ columns, rows: rows.slice(0, 50) });
-              
-              const followUpResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${GROQ_API_KEY}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  model: 'llama-3.3-70b-versatile',
-                  messages: [
-                    ...llmMessages,
-                    { role: 'assistant', content: reply },
-                    { role: 'user', content: `Here are the query results. Please provide a clear, natural language summary of these results:\n${resultSummary}` },
-                  ],
-                  temperature: 0.3,
-                  max_tokens: 2048,
-                }),
-              });
-
-              if (followUpResponse.ok) {
-                const followUpResult = await followUpResponse.json();
-                reply = followUpResult.choices?.[0]?.message?.content || reply;
-              }
-            } else {
-              reply += '\n\nThe query returned no results.';
-            }
-          }
+        if (followUp.ok) {
+          const followUpResult = await followUp.json();
+          reply = followUpResult.choices?.[0]?.message?.content || reply;
         }
-      } catch (neo4jError) {
-        console.error('Neo4j execution error:', neo4jError);
-        reply += '\n\n⚠️ Could not execute database query. Providing answer based on general knowledge of the dataset.';
+      } else if (queryResult?.error) {
+        reply += `\n\n⚠️ Query error: ${queryResult.error}`;
       }
     }
 
