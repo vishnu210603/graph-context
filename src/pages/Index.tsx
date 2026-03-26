@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import GraphVisualization from '@/components/GraphVisualization';
 import NodeInfoPanel from '@/components/NodeInfoPanel';
 import ChatInterface from '@/components/ChatInterface';
+import FilterPanel, { GraphFilters, DEFAULT_FILTERS } from '@/components/FilterPanel';
+import AnalyticsPanel from '@/components/AnalyticsPanel';
 import { GraphNode, GraphData } from '@/lib/graphData';
 import { supabase } from '@/integrations/supabase/client';
 import { Loader2, Network } from 'lucide-react';
@@ -11,6 +13,7 @@ const Index = () => {
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [filters, setFilters] = useState<GraphFilters>({ ...DEFAULT_FILTERS });
   const graphContainerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
@@ -27,20 +30,37 @@ const Index = () => {
     return () => window.removeEventListener('resize', updateDimensions);
   }, [updateDimensions]);
 
-  useEffect(() => {
-    const fetchGraph = async () => {
-      try {
-        const resp = await supabase.functions.invoke('graph-data');
-        if (resp.error) throw new Error(resp.error.message);
-        setGraphData(resp.data || { nodes: [], links: [] });
-      } catch (err: any) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchGraph();
+  const fetchGraph = useCallback(async (filterParams?: GraphFilters) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const body = filterParams ? {
+        orderId: filterParams.orderId || null,
+        plantId: filterParams.plantId || null,
+        materialId: filterParams.materialId || null,
+        currency: filterParams.currency || null,
+        minRevenue: filterParams.minRevenue ?? 0,
+        maxRevenue: filterParams.maxRevenue ?? 999999,
+        minQty: filterParams.minQty ?? 0,
+      } : undefined;
+
+      const resp = await supabase.functions.invoke('graph-data', { body });
+      if (resp.error) throw new Error(resp.error.message);
+      setGraphData(resp.data || { nodes: [], links: [] });
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    fetchGraph();
+  }, [fetchGraph]);
+
+  const handleApplyFilters = () => {
+    fetchGraph(filters);
+  };
 
   return (
     <div className="h-screen w-screen flex overflow-hidden">
@@ -54,6 +74,9 @@ const Index = () => {
             {graphData.nodes.length} nodes · {graphData.links.length} edges
           </span>
         </div>
+
+        {/* Filter Panel */}
+        <FilterPanel filters={filters} onChange={setFilters} onApply={handleApplyFilters} />
 
         {loading ? (
           <div className="flex items-center justify-center h-full">
@@ -77,6 +100,9 @@ const Index = () => {
             height={dimensions.height}
           />
         )}
+
+        {/* Analytics Panel */}
+        <AnalyticsPanel />
 
         <NodeInfoPanel node={selectedNode} onClose={() => setSelectedNode(null)} />
       </div>
