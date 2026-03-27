@@ -39,6 +39,7 @@ const Index = () => {
         plantId: filterParams.plantId || null,
         materialId: filterParams.materialId || null,
         currency: filterParams.currency || null,
+        nodeType: filterParams.nodeType || null,
         minRevenue: filterParams.minRevenue ?? 0,
         maxRevenue: filterParams.maxRevenue ?? 999999,
         minQty: filterParams.minQty ?? 0,

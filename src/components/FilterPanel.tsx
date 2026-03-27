@@ -10,6 +10,7 @@ export interface GraphFilters {
   plantId: string | null;
   materialId: string | null;
   currency: string | null;
+  nodeType: string | null;
   minRevenue: number;
   maxRevenue: number;
   minQty: number;
@@ -20,6 +21,7 @@ export const DEFAULT_FILTERS: GraphFilters = {
   plantId: null,
   materialId: null,
   currency: null,
+  nodeType: null,
   minRevenue: 0,
   maxRevenue: 50000,
   minQty: 0,
@@ -37,6 +39,7 @@ const FilterPanel = ({ filters, onChange, onApply }: FilterPanelProps) => {
   const [currencies, setCurrencies] = useState<string[]>([]);
   const [sampleOrders, setSampleOrders] = useState<string[]>([]);
   const [sampleMaterials, setSampleMaterials] = useState<string[]>([]);
+  const [nodeTypes, setNodeTypes] = useState<string[]>([]);
 
   useEffect(() => {
     const fetchDropdowns = async () => {
@@ -47,6 +50,7 @@ const FilterPanel = ({ filters, onChange, onApply }: FilterPanelProps) => {
           setCurrencies(resp.data.currencies || []);
           setSampleOrders(resp.data.orders || []);
           setSampleMaterials(resp.data.materials || []);
+          setNodeTypes(resp.data.nodeTypes || []);
         }
       } catch (e) {
         console.error('Failed to load filter options:', e);
@@ -126,6 +130,19 @@ const FilterPanel = ({ filters, onChange, onApply }: FilterPanelProps) => {
             >
               <option value="">All Currencies</option>
               {currencies.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+
+          {/* Node Type */}
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Node Type</label>
+            <select
+              value={filters.nodeType || ''}
+              onChange={e => update({ nodeType: e.target.value || null })}
+              className="w-full mt-1 bg-secondary text-foreground text-xs rounded-md px-2 py-1.5 border border-border focus:outline-none focus:ring-1 focus:ring-primary"
+            >
+              <option value="">All Types</option>
+              {nodeTypes.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
           </div>
 
