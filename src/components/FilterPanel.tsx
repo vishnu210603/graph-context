@@ -10,6 +10,7 @@ export interface GraphFilters {
   plantId: string | null;
   materialId: string | null;
   currency: string | null;
+  nodeType: string | null;
   minRevenue: number;
   maxRevenue: number;
   minQty: number;
@@ -20,6 +21,7 @@ export const DEFAULT_FILTERS: GraphFilters = {
   plantId: null,
   materialId: null,
   currency: null,
+  nodeType: null,
   minRevenue: 0,
   maxRevenue: 50000,
   minQty: 0,
