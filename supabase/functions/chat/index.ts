@@ -1,150 +1,233 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import neo4j from "npm:neo4j-driver@5.27.0";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
-const SYSTEM_PROMPT = `You are a precise data analyst assistant for a business graph database stored in Neo4j. The database contains:
+serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders });
+  }
 
-ENTITIES: SalesOrder, PurchaseOrder, Delivery, BillingDocument, Invoice, Payment, JournalEntry, Customer, Material, Product, Plant, Address, SalesOrderItem, PurchaseOrderItem
-
-RELATIONSHIPS: 
-- SalesOrder -[:HAS_ITEM]-> SalesOrderItem
-- SalesOrderItem -[:USES_MATERIAL]-> Material
-- Material -[:PRODUCED_AT]-> Plant
-- Orders linked to Customers via various relationships
-- Deliveries linked to Orders/Plants
-- BillingDocuments linked to Deliveries/Orders
-- JournalEntries linked to BillingDocuments
-
-CRITICAL RULES:
-1. You MUST ALWAYS generate a Cypher query to answer ANY data question. NEVER guess or make up data.
-2. Put your query in a \`\`\`cypher code block. Generate exactly ONE query.
-3. ONLY answer questions about this business dataset (orders, deliveries, invoices, customers, products, materials, plants, etc.)
-4. For unrelated questions respond: "This system is designed to answer questions related to the provided dataset only."
-5. Keep queries simple and efficient. Always use LIMIT (default LIMIT 25).
-6. When summarizing results, be specific with numbers and IDs from the actual data. Never fabricate values.
-7. If a query returns no results, say so clearly - do NOT make up data.
-8. Common property names: salesOrder (on SalesOrder), plant (on Plant), id (on Material), transactionCurrency, netAmount, requestedQuantity (on SalesOrderItem)
-
-EXAMPLE QUERIES:
-- Count orders: MATCH (so:SalesOrder) RETURN count(so) AS totalOrders
-- Top revenue: MATCH (so:SalesOrder)-[:HAS_ITEM]->(item) WITH so, sum(item.netAmount) AS revenue RETURN so.salesOrder, revenue ORDER BY revenue DESC LIMIT 10
-- Materials usage: MATCH (:SalesOrderItem)-[:USES_MATERIAL]->(m:Material) RETURN m.id, count(*) AS usage ORDER BY usage DESC LIMIT 10`;
-
-async function executeCypher(query: string): Promise<any> {
   const NEO4J_URI = Deno.env.get('NEO4J_URI');
   const NEO4J_USER = Deno.env.get('NEO4J_USER');
   const NEO4J_PASSWORD = Deno.env.get('NEO4J_PASSWORD');
-  if (!NEO4J_URI || !NEO4J_USER || !NEO4J_PASSWORD) return { error: 'Neo4j not configured' };
+  const GROQ_API_KEY = Deno.env.get('GROQ_API_KEY');
 
-  const driver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD));
-  const session = driver.session();
-
-  try {
-    const result = await session.run(query);
-    const records = result.records.map((record: any) => {
-      const obj: Record<string, any> = {};
-      record.keys.forEach((key: string) => {
-        const val = record.get(key);
-        if (val && typeof val === 'object' && val.properties) {
-          obj[key] = { labels: val.labels, ...val.properties };
-          for (const [k, v] of Object.entries(obj[key])) {
-            if (typeof v === 'object' && v !== null && 'low' in v) obj[key][k] = (v as any).low;
-          }
-        } else if (typeof val === 'object' && val !== null && 'low' in val) {
-          obj[key] = (val as any).low;
-        } else {
-          obj[key] = val;
-        }
-      });
-      return obj;
+  if (!NEO4J_URI || !NEO4J_USER || !NEO4J_PASSWORD) {
+    return new Response(JSON.stringify({ error: 'Neo4j credentials not configured' }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
-    return records;
-  } catch (err) {
-    console.error('Cypher execution error:', err);
-    return { error: err.message };
-  } finally {
-    await session.close();
-    await driver.close();
   }
-}
 
-serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+  if (!GROQ_API_KEY) {
+    return new Response(JSON.stringify({ error: 'GROQ_API_KEY not configured' }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
 
-  try {
-    const { messages } = await req.json();
-    const GROQ_API_KEY = Deno.env.get('GROQ_API_KEY');
-    if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY is not configured');
+  const host = NEO4J_URI.replace('neo4j+s://', '').replace('neo4j://', '').split('/')[0];
+  const dbName = host.split('.')[0];
+  const neo4jQueryUrl = `https://${host}/db/${dbName}/query/v2`;
+  const authHeader = 'Basic ' + btoa(`${NEO4J_USER}:${NEO4J_PASSWORD}`);
 
-    const llmMessages = [{ role: 'system', content: SYSTEM_PROMPT }, ...messages];
-
-    // First LLM call to generate Cypher
-    const llmResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  async function runCypher(query: string, params: Record<string, any> = {}) {
+    const resp = await fetch(neo4jQueryUrl, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: llmMessages, temperature: 0.1, max_tokens: 1500 }),
+      headers: {
+        'Authorization': authHeader,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ statement: query, parameters: params }),
     });
 
-    if (!llmResponse.ok) {
-      if (llmResponse.status === 429) {
-        return new Response(JSON.stringify({ reply: 'Rate limit reached. Please wait a moment and try again.' }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-      throw new Error(`LLM API error: ${llmResponse.status}`);
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Neo4j HTTP error ${resp.status}: ${text}`);
     }
 
-    const llmResult = await llmResponse.json();
-    let reply = llmResult.choices?.[0]?.message?.content || 'No response generated.';
+    const data = await resp.json();
+    if (data.errors && data.errors.length > 0) {
+      throw new Error(data.errors.map((e: any) => e.message).join('; '));
+    }
+    return data;
+  }
 
-    // Extract and execute Cypher query
-    const cypherMatch = reply.match(/```cypher\n([\s\S]*?)```/);
-    if (cypherMatch) {
-      const cypherQuery = cypherMatch[1].trim();
-      console.log('Executing Cypher:', cypherQuery);
-      const queryResult = await executeCypher(cypherQuery);
+  async function getSchemaInfo() {
+    try {
+      const labelsResult = await runCypher("CALL db.labels() YIELD label RETURN collect(label) as labels");
+      const relsResult = await runCypher("CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) as types");
 
-      if (queryResult && !queryResult.error) {
-        const resultStr = JSON.stringify(queryResult.slice(0, 50)).substring(0, 4000);
-        const recordCount = queryResult.length;
+      const labels = labelsResult.data?.values?.[0]?.[0] || [];
+      const relTypes = relsResult.data?.values?.[0]?.[0] || [];
 
-        // Second LLM call to summarize actual results
-        const followUp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'llama-3.3-70b-versatile',
-            messages: [
-              { role: 'system', content: 'You are a data analyst. Summarize the query results clearly and specifically. Use exact numbers and IDs from the data. Format with markdown. Do NOT include the cypher query in your response. If results are empty, clearly state no data was found.' },
-              { role: 'user', content: messages[messages.length - 1].content },
-              { role: 'assistant', content: `I ran a query and got ${recordCount} results.` },
-              { role: 'user', content: `Here are the actual query results (${recordCount} records):\n${resultStr}\n\nProvide a clear, specific summary based ONLY on this data. Do not make up any values.` },
-            ],
-            temperature: 0.1,
-            max_tokens: 1500,
-          }),
+      const propsInfo: string[] = [];
+      for (const label of labels.slice(0, 10)) {
+        try {
+          const propResult = await runCypher(`MATCH (n:\`${label}\`) RETURN keys(n) as props LIMIT 1`);
+          const props = propResult.data?.values?.[0]?.[0] || [];
+          propsInfo.push(`${label}: {${props.join(', ')}}`);
+        } catch { /* skip */ }
+      }
+
+      return { labels, relTypes, propsInfo };
+    } catch (e) {
+      console.error('Schema fetch error:', e);
+      return { labels: [], relTypes: [], propsInfo: [] };
+    }
+  }
+
+  try {
+    const body = await req.json();
+    // Support both old format { messages } and new format { message, history }
+    let message: string;
+    let history: { role: string; content: string }[] = [];
+
+    if (body.message) {
+      message = body.message;
+      history = body.history || [];
+    } else if (body.messages && Array.isArray(body.messages)) {
+      const msgs = body.messages;
+      message = msgs[msgs.length - 1]?.content || '';
+      history = msgs.slice(0, -1);
+    } else {
+      return new Response(JSON.stringify({ error: 'Message is required' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (!message || typeof message !== 'string') {
+      return new Response(JSON.stringify({ error: 'Message is required' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Guardrail
+    const lowerMsg = message.toLowerCase();
+    const offTopicPatterns = [
+      /write (a |me )?(poem|story|essay|song|joke)/,
+      /what is the meaning of life/,
+      /tell me about yourself/,
+      /who (is|was) (the president|elon|trump|biden)/,
+      /recipe for/,
+      /how to (cook|bake|make food)/,
+    ];
+
+    if (offTopicPatterns.some(p => p.test(lowerMsg))) {
+      return new Response(JSON.stringify({
+        response: "This system is designed to answer questions related to the provided dataset only. I can help you explore sales orders, deliveries, billing documents, journal entries, materials, plants, and their relationships."
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    const schema = await getSchemaInfo();
+
+    const systemPrompt = `You are a data analyst assistant for a business graph database. You help users query and understand relationships between business entities.
+
+## Database Schema (Neo4j)
+Node Labels: ${schema.labels.join(', ')}
+Relationship Types: ${schema.relTypes.join(', ')}
+Node Properties:
+${schema.propsInfo.join('\n')}
+
+## Your Role
+1. When the user asks a question about the data, generate a Cypher query to answer it.
+2. Return ONLY a JSON object with this format: {"cypher": "YOUR QUERY HERE", "explanation": "brief explanation"}
+3. If the question is not related to the dataset, respond with: {"guardrail": true, "response": "This system is designed to answer questions related to the provided dataset only."}
+4. Use LIMIT to keep results manageable (max 25 rows).
+5. Always use proper Cypher syntax for Neo4j.
+6. Focus on the entity types and relationships present in the schema.
+
+## Important
+- Only answer questions about the dataset
+- Generate valid Cypher queries
+- Be concise in explanations`;
+
+    const chatMessages = [
+      { role: 'system', content: systemPrompt },
+      ...(history || []).slice(-6),
+      { role: 'user', content: message },
+    ];
+
+    const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: chatMessages,
+        temperature: 0.1,
+        max_tokens: 1024,
+      }),
+    });
+
+    if (!groqResp.ok) {
+      const errText = await groqResp.text();
+      console.error('Groq error:', groqResp.status, errText);
+      if (groqResp.status === 429) {
+        return new Response(JSON.stringify({ response: 'Rate limited. Please try again in a moment.' }), {
+          status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
+      }
+      throw new Error(`Groq API error: ${groqResp.status}`);
+    }
 
-        if (followUp.ok) {
-          const followUpResult = await followUp.json();
-          reply = followUpResult.choices?.[0]?.message?.content || reply;
+    const groqData = await groqResp.json();
+    const llmResponse = groqData.choices?.[0]?.message?.content || '';
+
+    let finalResponse = '';
+    try {
+      const jsonMatch = llmResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+
+        if (parsed.guardrail) {
+          finalResponse = parsed.response || "This system is designed to answer questions related to the provided dataset only.";
+        } else if (parsed.cypher) {
+          try {
+            const cypherResult = await runCypher(parsed.cypher);
+            const rows = cypherResult.data?.values || [];
+            const columns = cypherResult.data?.fields || [];
+
+            if (rows.length === 0) {
+              finalResponse = `${parsed.explanation || ''}\n\nThe query returned no results.`;
+            } else {
+              let resultTable = `| ${columns.join(' | ')} |\n| ${columns.map(() => '---').join(' | ')} |\n`;
+              for (const row of rows.slice(0, 25)) {
+                const formattedRow = row.map((cell: any) => {
+                  if (cell === null || cell === undefined) return '-';
+                  if (typeof cell === 'object') return JSON.stringify(cell).slice(0, 50);
+                  return String(cell).slice(0, 50);
+                });
+                resultTable += `| ${formattedRow.join(' | ')} |\n`;
+              }
+
+              finalResponse = `${parsed.explanation || ''}\n\n${resultTable}\n\n*${rows.length} result${rows.length !== 1 ? 's' : ''}*`;
+            }
+          } catch (cypherErr: any) {
+            finalResponse = `Query failed: ${cypherErr.message}\n\nCould you rephrase your question?`;
+          }
+        } else {
+          finalResponse = llmResponse;
         }
-      } else if (queryResult?.error) {
-        // Try to fix the query
-        reply = `I attempted to query the database but encountered an error: ${queryResult.error}\n\nPlease try rephrasing your question.`;
+      } else {
+        finalResponse = llmResponse;
       }
+    } catch {
+      finalResponse = llmResponse;
     }
 
-    return new Response(JSON.stringify({ reply }), {
+    return new Response(JSON.stringify({ response: finalResponse }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
-  } catch (error) {
-    console.error('Chat error:', error);
-    return new Response(JSON.stringify({ reply: `Error: ${error.message}` }), {
+  } catch (e) {
+    console.error('Chat error:', e);
+    return new Response(JSON.stringify({ error: e instanceof Error ? e.message : 'Unknown error' }), {
       status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }

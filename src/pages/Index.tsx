@@ -2,18 +2,22 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import GraphVisualization from '@/components/GraphVisualization';
 import NodeInfoPanel from '@/components/NodeInfoPanel';
 import ChatInterface from '@/components/ChatInterface';
-import FilterPanel, { GraphFilters, DEFAULT_FILTERS } from '@/components/FilterPanel';
+import FilterPanel from '@/components/FilterPanel';
 import AnalyticsPanel from '@/components/AnalyticsPanel';
-import { GraphNode, GraphData } from '@/lib/graphData';
-import { supabase } from '@/integrations/supabase/client';
+import { fetchInitialGraph, fetchFilteredGraph, fetchLookupData, expandNode } from '@/lib/graphApi';
+import type { GraphNode, GraphData, FilterState, LookupData } from '@/types/graph';
+import { DEFAULT_FILTERS } from '@/types/graph';
 import { Loader2, Network } from 'lucide-react';
+
+const EMPTY_LOOKUP: LookupData = { orders: [], plants: [], materials: [], currencies: [], nodeTypes: [] };
 
 const Index = () => {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [filters, setFilters] = useState<GraphFilters>({ ...DEFAULT_FILTERS });
+  const [filters, setFilters] = useState<FilterState>({ ...DEFAULT_FILTERS });
+  const [lookupData, setLookupData] = useState<LookupData>(EMPTY_LOOKUP);
   const graphContainerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
@@ -30,44 +34,69 @@ const Index = () => {
     return () => window.removeEventListener('resize', updateDimensions);
   }, [updateDimensions]);
 
-  const fetchGraph = useCallback(async (filterParams?: GraphFilters) => {
+  // Load initial graph + lookup data
+  useEffect(() => {
+    const init = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [graph, lookup] = await Promise.all([
+          fetchInitialGraph(),
+          fetchLookupData(),
+        ]);
+        setGraphData(graph);
+        setLookupData(lookup);
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+    init();
+  }, []);
+
+  const handleApplyFilters = async () => {
     setLoading(true);
     setError(null);
     try {
-      const body = filterParams ? {
-        orderId: filterParams.orderId || null,
-        plantId: filterParams.plantId || null,
-        materialId: filterParams.materialId || null,
-        currency: filterParams.currency || null,
-        nodeType: filterParams.nodeType || null,
-        minRevenue: filterParams.minRevenue ?? 0,
-        maxRevenue: filterParams.maxRevenue ?? 999999,
-        minQty: filterParams.minQty ?? 0,
-      } : undefined;
+      const hasAnyFilter = filters.orderId || filters.plantId || filters.materialId ||
+        filters.currency || filters.nodeType || filters.minRevenue > 0 ||
+        filters.maxRevenue < 50000 || filters.minQty > 0;
 
-      const resp = await supabase.functions.invoke('graph-data', { body });
-      if (resp.error) throw new Error(resp.error.message);
-      setGraphData(resp.data || { nodes: [], links: [] });
+      const graph = hasAnyFilter
+        ? await fetchFilteredGraph(filters)
+        : await fetchInitialGraph();
+      setGraphData(graph);
+      setSelectedNode(null);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  };
 
-  useEffect(() => {
-    fetchGraph();
-  }, [fetchGraph]);
-
-  const handleApplyFilters = () => {
-    fetchGraph(filters);
+  const handleExpand = async (nodeId: string) => {
+    try {
+      const expanded = await expandNode(nodeId);
+      // Merge expanded nodes/links into existing graph
+      setGraphData(prev => {
+        const existingNodeIds = new Set(prev.nodes.map(n => n.id));
+        const existingLinkKeys = new Set(prev.links.map(l => `${l.source}-${l.target}`));
+        const newNodes = expanded.nodes.filter(n => !existingNodeIds.has(n.id));
+        const newLinks = expanded.links.filter(l => !existingLinkKeys.has(`${l.source}-${l.target}`));
+        return {
+          nodes: [...prev.nodes, ...newNodes],
+          links: [...prev.links, ...newLinks],
+        };
+      });
+    } catch (err: any) {
+      console.error('Expand error:', err);
+    }
   };
 
   return (
     <div className="h-screen w-screen flex overflow-hidden">
-      {/* Graph Panel */}
       <div className="flex-1 relative" ref={graphContainerRef}>
-        {/* Title bar */}
         <div className="absolute top-0 left-0 right-0 z-10 px-4 py-3 flex items-center gap-2 bg-gradient-to-b from-background via-background/80 to-transparent">
           <Network className="w-5 h-5 text-primary" />
           <h1 className="text-base font-bold text-foreground">Context Graph Explorer</h1>
@@ -76,8 +105,13 @@ const Index = () => {
           </span>
         </div>
 
-        {/* Filter Panel */}
-        <FilterPanel filters={filters} onChange={setFilters} onApply={handleApplyFilters} />
+        <FilterPanel
+          filters={filters}
+          lookupData={lookupData}
+          onChange={setFilters}
+          onApply={handleApplyFilters}
+          isLoading={loading}
+        />
 
         {loading ? (
           <div className="flex items-center justify-center h-full">
@@ -97,18 +131,21 @@ const Index = () => {
           <GraphVisualization
             data={graphData}
             onNodeClick={setSelectedNode}
+            selectedNodeId={selectedNode?.id}
             width={dimensions.width}
             height={dimensions.height}
           />
         )}
 
-        {/* Analytics Panel */}
         <AnalyticsPanel />
 
-        <NodeInfoPanel node={selectedNode} onClose={() => setSelectedNode(null)} />
+        <NodeInfoPanel
+          node={selectedNode}
+          onClose={() => setSelectedNode(null)}
+          onExpand={handleExpand}
+        />
       </div>
 
-      {/* Chat Panel */}
       <div className="w-[380px] border-l border-border flex-shrink-0">
         <ChatInterface />
       </div>
