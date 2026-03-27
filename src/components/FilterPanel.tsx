@@ -39,6 +39,7 @@ const FilterPanel = ({ filters, onChange, onApply }: FilterPanelProps) => {
   const [currencies, setCurrencies] = useState<string[]>([]);
   const [sampleOrders, setSampleOrders] = useState<string[]>([]);
   const [sampleMaterials, setSampleMaterials] = useState<string[]>([]);
+  const [nodeTypes, setNodeTypes] = useState<string[]>([]);
 
   useEffect(() => {
     const fetchDropdowns = async () => {
