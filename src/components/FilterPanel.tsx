@@ -50,6 +50,7 @@ const FilterPanel = ({ filters, onChange, onApply }: FilterPanelProps) => {
           setCurrencies(resp.data.currencies || []);
           setSampleOrders(resp.data.orders || []);
           setSampleMaterials(resp.data.materials || []);
+          setNodeTypes(resp.data.nodeTypes || []);
         }
       } catch (e) {
         console.error('Failed to load filter options:', e);
