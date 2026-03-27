@@ -133,6 +133,19 @@ const FilterPanel = ({ filters, onChange, onApply }: FilterPanelProps) => {
             </select>
           </div>
 
+          {/* Node Type */}
+          <div>
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Node Type</label>
+            <select
+              value={filters.nodeType || ''}
+              onChange={e => update({ nodeType: e.target.value || null })}
+              className="w-full mt-1 bg-secondary text-foreground text-xs rounded-md px-2 py-1.5 border border-border focus:outline-none focus:ring-1 focus:ring-primary"
+            >
+              <option value="">All Types</option>
+              {nodeTypes.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+
           {/* Revenue Range */}
           <div>
             <label className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
